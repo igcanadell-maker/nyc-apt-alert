@@ -1,5 +1,4 @@
 import requests, json, os, re
-from html.parser import HTMLParser
 
 TELEGRAM_TOKEN = os.environ["TELEGRAM_TOKEN"]
 CHAT_ID = os.environ["CHAT_ID"]
@@ -12,45 +11,31 @@ SEARCH_URLS = [
 
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-    "Accept": "application/json",
     "Accept-Language": "en-US,en;q=0.9",
 }
 
 def get_listings_from_url(url):
     listings = []
     try:
-        api_url = url.replace("streeteasy.com/for-rent/", "streeteasy.com/api/v1/listings/rentals?areas=")
         r = requests.get(url, headers=HEADERS, timeout=15)
-        
-        # Buscar JSON embebido en la página
         content = r.text
-        match = re.search(r'"listings"\s*:\s*(\[.*?\])\s*[,}]', content, re.DOTALL)
-        if match:
-            try:
-                listings = json.loads(match.group(1))
-            except:
-                pass
-        
-        # Alternativa: buscar por listing IDs
-        if not listings:
-            ids = re.findall(r'"id"\s*:\s*(\d+)', content)
-            prices = re.findall(r'"price"\s*:\s*(\d+)', content)
-            addresses = re.findall(r'"address"\s*:\s*"([^"]+)"', content)
-            neighborhoods = re.findall(r'"neighborhood"\s*:\s*"([^"]+)"', content)
-            slugs = re.findall(r'"slug"\s*:\s*"(/rental/[^"]+)"', content)
-            beds_list = re.findall(r'"bedrooms"\s*:\s*(\d+)', content)
-            
-            for i, apt_id in enumerate(ids[:50]):
-                listings.append({
-                    "id": apt_id,
-                    "price": prices[i] if i < len(prices) else "?",
-                    "address": addresses[i] if i < len(addresses) else "?",
-                    "neighborhood": neighborhoods[i] if i < len(neighborhoods) else "?",
-                    "slug": slugs[i] if i < len(slugs) else "",
-                    "bedrooms": beds_list[i] if i < len(beds_list) else "?",
-                })
+        ids = re.findall(r'"id"\s*:\s*(\d{6,})', content)
+        prices = re.findall(r'"price"\s*:\s*(\d+)', content)
+        addresses = re.findall(r'"address"\s*:\s*"([^"]+)"', content)
+        neighborhoods = re.findall(r'"neighborhood"\s*:\s*"([^"]+)"', content)
+        slugs = re.findall(r'"slug"\s*:\s*"(/rental/[^"]+)"', content)
+        beds_list = re.findall(r'"bedrooms"\s*:\s*(\d+)', content)
+        for i, apt_id in enumerate(ids[:50]):
+            listings.append({
+                "id": apt_id,
+                "price": prices[i] if i < len(prices) else "?",
+                "address": addresses[i] if i < len(addresses) else "?",
+                "neighborhood": neighborhoods[i] if i < len(neighborhoods) else "?",
+                "slug": slugs[i] if i < len(slugs) else "",
+                "bedrooms": beds_list[i] if i < len(beds_list) else "?",
+            })
     except Exception as e:
-        print(f"Error: {e}")
+        print("Error: " + str(e))
     return listings
 
 def load_seen():
@@ -65,7 +50,7 @@ def save_seen(seen):
         json.dump(list(seen), f)
 
 def send_telegram(msg):
-    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+    url = "https://api.telegram.org/bot" + TELEGRAM_TOKEN + "/sendMessage"
     requests.post(url, data={"chat_id": CHAT_ID, "text": msg, "parse_mode": "HTML"})
 
 def main():
@@ -74,7 +59,7 @@ def main():
 
     for search_url in SEARCH_URLS:
         listings = get_listings_from_url(search_url)
-        print(f"Encontrados {len(listings)} listings en {search_url[:60]}...")
+        print("Encontrados " + str(len(listings)) + " listings")
 
         for apt in listings:
             apt_id = str(apt.get("id", ""))
@@ -83,21 +68,35 @@ def main():
 
             price = apt.get("price", "?")
             beds = apt.get("bedrooms", "?")
-            area = apt.get("neighborhood", apt.get("area", "?"))
+            area = apt.get("neighborhood", "?")
             address = apt.get("address", "?")
-            slug = apt.get("slug", apt.get("url", ""))
-            listing_url = ("https://streeteasy.com" + slug) if slug and not slug.startswith("http") else (slug or search_url)
+            slug = apt.get("slug", "")
+            if slug and not slug.startswith("http"):
+                listing_url = "https://streeteasy.com" + slug
+            else:
+                listing_url = search_url
 
-            beds_label = "Studio" if str(beds) in ["0", "0.0"] else f"{beds} br"
+            beds_label = "Studio" if str(beds) in ["0", "0.0"] else str(beds) + " br"
 
             try:
-                price_num = int(str(price).replace("$", "").replace(",", "").strip())
-                star = "⭐" if price_num <= 2300 else ""
+                price_num = int(str(price).replace("$","").replace(",","").strip())
+                star = " PRECIO IDEAL" if price_num <= 2300 else ""
             except:
                 star = ""
 
             msg = (
-                f"🏠 <b>Nuevo depto en NYC</b> {star}\n"
-                f"📍 {area} — {address}\n"
-                f"💰 ${price}/mes | {beds_label}\n"
-                f"🔗
+                "Nuevo depto en NYC" + star + "\n"
+                "Barrio: " + area + " - " + address + "\n"
+                "Precio: $" + str(price) + "/mes | " + beds_label + "\n"
+                "Ver: <a href='" + listing_url + "'>StreetEasy</a>"
+            )
+
+            send_telegram(msg)
+            seen.add(apt_id)
+            new_count += 1
+
+    save_seen(seen)
+    print("Enviadas " + str(new_count) + " alertas nuevas.")
+
+if __name__ == "__main__":
+    main()
