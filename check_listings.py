@@ -1,54 +1,57 @@
-import requests, json, os
+import requests, json, os, re
+from html.parser import HTMLParser
 
 TELEGRAM_TOKEN = os.environ["TELEGRAM_TOKEN"]
 CHAT_ID = os.environ["CHAT_ID"]
 SEEN_FILE = "seen.json"
 
-AREA_IDS = [
-    297, 298, 299, 300, 301, 302, 303, 304, 305, 306,
-    307, 308, 309, 310, 311, 312, 313, 314, 315, 316,
-    317, 318, 319, 320, 104, 105, 106, 107, 108, 109,
-    110, 111, 112, 113, 114, 115, 116, 117, 118, 119,
-    120, 121, 122, 123, 124, 125
+SEARCH_URLS = [
+    "https://streeteasy.com/for-rent/brooklyn/bed_stuy,boerum_hill,brooklyn_heights,bushwick,carroll_gardens,clinton_hill,cobble_hill,crown_heights,dumbo,downtown_brooklyn,east_flatbush,flatbush,fort_greene,gowanus,greenpoint,kensington,park_slope,prospect_heights,prospect_lefferts_gardens,prospect_park_south,williamsburg,ditmas_park,windsor_terrace,ridgewood?price=-2500&beds=0,1,2,3,4",
+    "https://streeteasy.com/for-rent/manhattan/financial_district,tribeca,soho,greenwich_village,west_village,chelsea,flatiron,gramercy,murray_hill,midtown,hells_kitchen,upper_west_side,upper_east_side,harlem,east_harlem,washington_heights,inwood,lower_east_side,east_village,noho,nolita,chinatown,battery_park_city?price=-2500&beds=0,1,2,3,4",
 ]
 
-AREA_NAMES = {
-    297: "Bedford-Stuyvesant", 298: "Boerum Hill", 299: "Brooklyn Heights",
-    300: "Bushwick", 301: "Carroll Gardens", 302: "Clinton Hill",
-    303: "Cobble Hill", 304: "Crown Heights", 305: "DUMBO",
-    306: "Downtown Brooklyn", 307: "East Flatbush", 308: "Flatbush",
-    309: "Fort Greene", 310: "Gowanus", 311: "Greenpoint",
-    312: "Kensington", 313: "Park Slope", 314: "Prospect Heights",
-    315: "Prospect Lefferts Gardens", 316: "Prospect Park South",
-    317: "Williamsburg", 318: "Ditmas Park", 319: "Windsor Terrace",
-    320: "Ridgewood", 104: "Financial District", 105: "Tribeca",
-    106: "SoHo", 107: "Greenwich Village", 108: "West Village",
-    109: "Chelsea", 110: "Flatiron", 111: "Gramercy", 112: "Murray Hill",
-    113: "Midtown", 114: "Hell's Kitchen", 115: "Upper West Side",
-    116: "Upper East Side", 117: "Harlem", 118: "East Harlem",
-    119: "Washington Heights", 120: "Inwood", 121: "Lower East Side",
-    122: "East Village", 123: "NoHo", 124: "Nolita", 125: "Chinatown"
+HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "Accept": "application/json",
+    "Accept-Language": "en-US,en;q=0.9",
 }
 
-def get_listings():
-    all_listings = []
-    for area_id in AREA_IDS:
-        try:
-            url = "https://api.apify.com/v2/acts/qwady~nyc-real-estate-api/run-sync-get-dataset-items"
-            # Usamos el endpoint directo de Borough
-            url = f"https://nyc-real-estate-api.apify.actor/rentals?areaId={area_id}&priceMax=2500&bedroomsMin=0&perPage=50"
-            headers = {"User-Agent": "Mozilla/5.0"}
-            r = requests.get(url, headers=headers, timeout=15)
-            data = r.json()
-            listings = data.get("edges", data.get("listings", data.get("rentals", [])))
-            if isinstance(listings, list):
-                for item in listings:
-                    node = item.get("node", item)
-                    node["_area_name"] = AREA_NAMES.get(area_id, str(area_id))
-                    all_listings.append(node)
-        except Exception as e:
-            print(f"Error fetching area {area_id}: {e}")
-    return all_listings
+def get_listings_from_url(url):
+    listings = []
+    try:
+        api_url = url.replace("streeteasy.com/for-rent/", "streeteasy.com/api/v1/listings/rentals?areas=")
+        r = requests.get(url, headers=HEADERS, timeout=15)
+        
+        # Buscar JSON embebido en la página
+        content = r.text
+        match = re.search(r'"listings"\s*:\s*(\[.*?\])\s*[,}]', content, re.DOTALL)
+        if match:
+            try:
+                listings = json.loads(match.group(1))
+            except:
+                pass
+        
+        # Alternativa: buscar por listing IDs
+        if not listings:
+            ids = re.findall(r'"id"\s*:\s*(\d+)', content)
+            prices = re.findall(r'"price"\s*:\s*(\d+)', content)
+            addresses = re.findall(r'"address"\s*:\s*"([^"]+)"', content)
+            neighborhoods = re.findall(r'"neighborhood"\s*:\s*"([^"]+)"', content)
+            slugs = re.findall(r'"slug"\s*:\s*"(/rental/[^"]+)"', content)
+            beds_list = re.findall(r'"bedrooms"\s*:\s*(\d+)', content)
+            
+            for i, apt_id in enumerate(ids[:50]):
+                listings.append({
+                    "id": apt_id,
+                    "price": prices[i] if i < len(prices) else "?",
+                    "address": addresses[i] if i < len(addresses) else "?",
+                    "neighborhood": neighborhoods[i] if i < len(neighborhoods) else "?",
+                    "slug": slugs[i] if i < len(slugs) else "",
+                    "bedrooms": beds_list[i] if i < len(beds_list) else "?",
+                })
+    except Exception as e:
+        print(f"Error: {e}")
+    return listings
 
 def load_seen():
     try:
@@ -67,45 +70,34 @@ def send_telegram(msg):
 
 def main():
     seen = load_seen()
-    listings = get_listings()
     new_count = 0
 
-    for apt in listings:
-        apt_id = str(apt.get("id", apt.get("listingId", apt.get("listing_id", ""))))
-        if not apt_id or apt_id in seen:
-            continue
+    for search_url in SEARCH_URLS:
+        listings = get_listings_from_url(search_url)
+        print(f"Encontrados {len(listings)} listings en {search_url[:60]}...")
 
-        price = apt.get("price", apt.get("rentPrice", apt.get("rent", "?")))
-        beds = apt.get("bedrooms", apt.get("beds", "?"))
-        area = apt.get("_area_name", apt.get("neighborhood", apt.get("area", "?")))
-        address = apt.get("address", apt.get("fullAddress", "Sin dirección"))
-        slug = apt.get("slug", apt.get("url", ""))
-        if slug and not slug.startswith("http"):
-            listing_url = "https://streeteasy.com" + slug
-        else:
-            listing_url = slug or "https://streeteasy.com/for-rent/nyc"
+        for apt in listings:
+            apt_id = str(apt.get("id", ""))
+            if not apt_id or apt_id in seen:
+                continue
 
-        beds_label = "Studio" if str(beds) in ["0", "0.0"] else f"{beds} br"
+            price = apt.get("price", "?")
+            beds = apt.get("bedrooms", "?")
+            area = apt.get("neighborhood", apt.get("area", "?"))
+            address = apt.get("address", "?")
+            slug = apt.get("slug", apt.get("url", ""))
+            listing_url = ("https://streeteasy.com" + slug) if slug and not slug.startswith("http") else (slug or search_url)
 
-        try:
-            price_num = int(str(price).replace("$", "").replace(",", "").strip())
-            star = "⭐" if price_num <= 2300 else ""
-        except:
-            star = ""
+            beds_label = "Studio" if str(beds) in ["0", "0.0"] else f"{beds} br"
 
-        msg = (
-            f"🏠 <b>Nuevo depto en NYC</b> {star}\n"
-            f"📍 {area} — {address}\n"
-            f"💰 ${price}/mes | {beds_label}\n"
-            f"🔗 <a href='{listing_url}'>Ver en StreetEasy</a>"
-        )
+            try:
+                price_num = int(str(price).replace("$", "").replace(",", "").strip())
+                star = "⭐" if price_num <= 2300 else ""
+            except:
+                star = ""
 
-        send_telegram(msg)
-        seen.add(apt_id)
-        new_count += 1
-
-    save_seen(seen)
-    print(f"Enviadas {new_count} alertas nuevas.")
-
-if __name__ == "__main__":
-    main()
+            msg = (
+                f"🏠 <b>Nuevo depto en NYC</b> {star}\n"
+                f"📍 {area} — {address}\n"
+                f"💰 ${price}/mes | {beds_label}\n"
+                f"🔗
