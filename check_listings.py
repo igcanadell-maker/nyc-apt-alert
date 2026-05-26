@@ -1,41 +1,44 @@
-import requests, json, os, re
+import json, os, re, subprocess, sys
+
+subprocess.run([sys.executable, "-m", "pip", "install", "playwright", "-q"])
+subprocess.run(["playwright", "install", "chromium", "--with-deps"], capture_output=True)
+
+from playwright.sync_api import sync_playwright
 
 TELEGRAM_TOKEN = os.environ["TELEGRAM_TOKEN"]
 CHAT_ID = os.environ["CHAT_ID"]
 SEEN_FILE = "seen.json"
 
-SEARCH_URLS = [
-    "https://streeteasy.com/for-rent/brooklyn/bed_stuy,boerum_hill,brooklyn_heights,bushwick,carroll_gardens,clinton_hill,cobble_hill,crown_heights,dumbo,downtown_brooklyn,east_flatbush,flatbush,fort_greene,gowanus,greenpoint,kensington,park_slope,prospect_heights,prospect_lefferts_gardens,prospect_park_south,williamsburg,ditmas_park,windsor_terrace,ridgewood?price=-2500&beds=0,1,2,3,4",
-    "https://streeteasy.com/for-rent/manhattan/financial_district,tribeca,soho,greenwich_village,west_village,chelsea,flatiron,gramercy,murray_hill,midtown,hells_kitchen,upper_west_side,upper_east_side,harlem,east_harlem,washington_heights,inwood,lower_east_side,east_village,noho,nolita,chinatown,battery_park_city?price=-2500&beds=0,1,2,3,4",
-]
+SEARCH_URL = "https://streeteasy.com/for-rent/nyc/status:open%7Cprice:500-2500%7Carea:103,104,105,106,107,108,109,110,112,113,115,116,117,120,122,130,131,132,133,137,141,142,143,146,152,157,158,162,302,303,304,305,306,307,310,313,318,319,320,321,322,324,325,326,328,329,340,343,346,354,355,358,364,367,412?sort_by=listed_at_desc"
 
-HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-    "Accept-Language": "en-US,en;q=0.9",
-}
-
-def get_listings_from_url(url):
+def get_listings():
     listings = []
-    try:
-        r = requests.get(url, headers=HEADERS, timeout=15)
-        content = r.text
-        ids = re.findall(r'"id"\s*:\s*(\d{6,})', content)
-        prices = re.findall(r'"price"\s*:\s*(\d+)', content)
-        addresses = re.findall(r'"address"\s*:\s*"([^"]+)"', content)
-        neighborhoods = re.findall(r'"neighborhood"\s*:\s*"([^"]+)"', content)
-        slugs = re.findall(r'"slug"\s*:\s*"(/rental/[^"]+)"', content)
-        beds_list = re.findall(r'"bedrooms"\s*:\s*(\d+)', content)
-        for i, apt_id in enumerate(ids[:50]):
-            listings.append({
-                "id": apt_id,
-                "price": prices[i] if i < len(prices) else "?",
-                "address": addresses[i] if i < len(addresses) else "?",
-                "neighborhood": neighborhoods[i] if i < len(neighborhoods) else "?",
-                "slug": slugs[i] if i < len(slugs) else "",
-                "bedrooms": beds_list[i] if i < len(beds_list) else "?",
-            })
-    except Exception as e:
-        print("Error: " + str(e))
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=True)
+        page = browser.new_page()
+        page.set_extra_http_headers({"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36"})
+        try:
+            page.goto(SEARCH_URL, timeout=30000, wait_until="networkidle")
+            content = page.content()
+            ids = re.findall(r'"id"\s*:\s*(\d{6,})', content)
+            prices = re.findall(r'"price"\s*:\s*(\d+)', content)
+            addresses = re.findall(r'"address"\s*:\s*"([^"]+)"', content)
+            neighborhoods = re.findall(r'"neighborhood"\s*:\s*"([^"]+)"', content)
+            slugs = re.findall(r'"/rental/[^"]{5,}"', content)
+            beds_list = re.findall(r'"bedrooms"\s*:\s*(\d+)', content)
+            print("IDs encontrados: " + str(len(ids)))
+            for i, apt_id in enumerate(ids[:50]):
+                listings.append({
+                    "id": apt_id,
+                    "price": prices[i] if i < len(prices) else "?",
+                    "address": addresses[i] if i < len(addresses) else "?",
+                    "neighborhood": neighborhoods[i] if i < len(neighborhoods) else "?",
+                    "slug": slugs[i].strip('"') if i < len(slugs) else "",
+                    "bedrooms": beds_list[i] if i < len(beds_list) else "?",
+                })
+        except Exception as e:
+            print("Error playwright: " + str(e))
+        browser.close()
     return listings
 
 def load_seen():
@@ -50,50 +53,46 @@ def save_seen(seen):
         json.dump(list(seen), f)
 
 def send_telegram(msg):
+    import urllib.request, urllib.parse
     url = "https://api.telegram.org/bot" + TELEGRAM_TOKEN + "/sendMessage"
-    requests.post(url, data={"chat_id": CHAT_ID, "text": msg, "parse_mode": "HTML"})
+    data = urllib.parse.urlencode({"chat_id": CHAT_ID, "text": msg, "parse_mode": "HTML"}).encode()
+    urllib.request.urlopen(url, data)
 
 def main():
     seen = load_seen()
     new_count = 0
+    listings = get_listings()
+    print("Total listings: " + str(len(listings)))
 
-    for search_url in SEARCH_URLS:
-        listings = get_listings_from_url(search_url)
-        print("Encontrados " + str(len(listings)) + " listings")
+    for apt in listings:
+        apt_id = str(apt.get("id", ""))
+        if not apt_id or apt_id in seen:
+            continue
 
-        for apt in listings:
-            apt_id = str(apt.get("id", ""))
-            if not apt_id or apt_id in seen:
-                continue
+        price = apt.get("price", "?")
+        beds = apt.get("bedrooms", "?")
+        area = apt.get("neighborhood", "?")
+        address = apt.get("address", "?")
+        slug = apt.get("slug", "")
+        listing_url = "https://streeteasy.com" + slug if slug else SEARCH_URL
+        beds_label = "Studio" if str(beds) in ["0", "0.0"] else str(beds) + " br"
 
-            price = apt.get("price", "?")
-            beds = apt.get("bedrooms", "?")
-            area = apt.get("neighborhood", "?")
-            address = apt.get("address", "?")
-            slug = apt.get("slug", "")
-            if slug and not slug.startswith("http"):
-                listing_url = "https://streeteasy.com" + slug
-            else:
-                listing_url = search_url
+        try:
+            price_num = int(str(price).replace("$","").replace(",","").strip())
+            star = " PRECIO IDEAL" if price_num <= 2300 else ""
+        except:
+            star = ""
 
-            beds_label = "Studio" if str(beds) in ["0", "0.0"] else str(beds) + " br"
+        msg = (
+            "Nuevo depto en NYC" + star + "\n"
+            "Barrio: " + area + " - " + address + "\n"
+            "Precio: $" + str(price) + "/mes | " + beds_label + "\n"
+            "Ver: <a href='" + listing_url + "'>StreetEasy</a>"
+        )
 
-            try:
-                price_num = int(str(price).replace("$","").replace(",","").strip())
-                star = " PRECIO IDEAL" if price_num <= 2300 else ""
-            except:
-                star = ""
-
-            msg = (
-                "Nuevo depto en NYC" + star + "\n"
-                "Barrio: " + area + " - " + address + "\n"
-                "Precio: $" + str(price) + "/mes | " + beds_label + "\n"
-                "Ver: <a href='" + listing_url + "'>StreetEasy</a>"
-            )
-
-            send_telegram(msg)
-            seen.add(apt_id)
-            new_count += 1
+        send_telegram(msg)
+        seen.add(apt_id)
+        new_count += 1
 
     save_seen(seen)
     print("Enviadas " + str(new_count) + " alertas nuevas.")
