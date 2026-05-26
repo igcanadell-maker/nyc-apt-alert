@@ -18,7 +18,8 @@ def get_listings():
         page = browser.new_page()
         page.set_extra_http_headers({"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36"})
         try:
-            page.goto(SEARCH_URL, timeout=60000, wait_until="domcontentloaded")             page.wait_for_timeout(5000)
+            page.goto(SEARCH_URL, timeout=60000, wait_until="domcontentloaded")
+            page.wait_for_timeout(5000)
             content = page.content()
             ids = re.findall(r'"id"\s*:\s*(\d{6,})', content)
             prices = re.findall(r'"price"\s*:\s*(\d+)', content)
