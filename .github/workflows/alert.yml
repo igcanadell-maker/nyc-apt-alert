@@ -24,4 +24,5 @@ jobs:
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           CHAT_ID: ${{ secrets.CHAT_ID }}
           APIFY_TOKEN: ${{ secrets.APIFY_TOKEN }}
+          SE_AUTH_TOKEN: ${{ secrets.SE_AUTH_TOKEN }}
         run: python check_listings.py
